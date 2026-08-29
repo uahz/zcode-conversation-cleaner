@@ -16,6 +16,7 @@ Zcode 对话删除程序 —— 数据层
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -57,6 +58,7 @@ class Conversation:
     updated_at: int  # ms
     message_count: int = 0
     source: str = "桌面端"  # 桌面端 / CLI
+    size: int = 0  # 关联文件占用字节
 
     @property
     def status_label(self) -> str:
@@ -69,6 +71,25 @@ class Conversation:
         except Exception:
             t = "—"
         return t
+
+    @property
+    def size_text(self) -> str:
+        return fmt_size(self.size)
+
+
+def fmt_size(b: int) -> str:
+    """字节数 → 人类可读。"""
+    try:
+        b = float(b)
+        if b >= 1024 ** 3:
+            return f"{b / 1024 ** 3:.2f} GB"
+        if b >= 1024 ** 2:
+            return f"{b / 1024 ** 2:.1f} MB"
+        if b >= 1024:
+            return f"{b / 1024:.0f} KB"
+        return f"{int(b)} B"
+    except Exception:
+        return "—"
 
 
 # ---------------------------------------------------------------- 扫描
@@ -164,7 +185,47 @@ def scan_conversations() -> list[Conversation]:
     # 若两者都无数据
     if not result:
         return []
+    # 补充每个会话的关联文件体积
+    for c in result.values():
+        c.size = session_size(c.task_id)
     return sorted(result.values(), key=lambda c: c.updated_at, reverse=True)
+
+
+# ---------------------------------------------------------------- 会话体积
+
+def _dir_size(p: Path) -> int:
+    """递归统计目录体积（忽略失败）。"""
+    total = 0
+    try:
+        for root, dirs, files in os.walk(p):
+            for f in files:
+                try:
+                    total += (Path(root) / f).stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def session_size(task_id: str) -> int:
+    """统计某会话的关联文件体积（rollout + artifacts + exec + image-cache）。"""
+    if not ZCODE_DIR.exists():
+        return 0
+    total = 0
+    roll = ZCODE_DIR / "cli" / "rollout"
+    for pat in (f"*{task_id}*.jsonl", f"model-io-{task_id}*"):
+        try:
+            for f in roll.glob(pat):
+                if f.is_file():
+                    total += f.stat().st_size
+        except OSError:
+            pass
+    for sub in ("artifacts", "exec", "image-cache"):
+        d = ZCODE_DIR / "cli" / sub / task_id
+        if d.is_dir():
+            total += _dir_size(d)
+    return total
 
 
 # ---------------------------------------------------------------- 删除
@@ -377,3 +438,197 @@ def list_backups() -> list[Path]:
     if not BACKUP_ROOT.exists():
         return []
     return sorted(BACKUP_ROOT.iterdir(), reverse=True)
+
+
+# ---------------------------------------------------------------- V2.0：消息预览
+
+def get_messages(task_id: str, limit: int = 400) -> list[dict]:
+    """
+    读取某会话的消息正文（part 表），按时间顺序分组为气泡。
+    返回 [{'role','time','text'}...]；无数据返回 []。
+    """
+    if not CLI_DB.exists():
+        return []
+    try:
+        con = _open_ro(CLI_DB)
+        cur = con.cursor()
+        try:
+            rows = cur.execute(
+                "SELECT p.message_id, p.time_created, p.data, m.data "
+                "FROM part p LEFT JOIN message m ON m.id = p.message_id "
+                "WHERE p.session_id = ? ORDER BY p.time_created, p.sequence",
+                (task_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        con.close()
+    except ScanError:
+        return []
+
+    bubbles: list[dict] = []
+    cur_bubble = None
+    for msg_id, ts, part_data, msg_data in rows[-limit:]:
+        try:
+            part = json.loads(part_data)
+            role = "assistant"
+            if msg_data:
+                try:
+                    role = json.loads(msg_data).get("role", "assistant")
+                except Exception:
+                    pass
+            ptype = part.get("type", "")
+            text = ""
+            if ptype == "text" and isinstance(part.get("text"), str):
+                text = part["text"]
+            elif ptype == "file":
+                text = f"📎 {part.get('filename', '附件')}"
+            elif ptype == "image":
+                text = f"🖼️ {part.get('filename', '图片')}"
+            else:
+                text = part.get("text") if isinstance(part.get("text"), str) else ""
+            if not text:
+                continue
+        except Exception:
+            continue
+        if cur_bubble is None or cur_bubble["message_id"] != msg_id:
+            cur_bubble = {"message_id": msg_id, "role": role, "time": ts or 0,
+                          "texts": []}
+            bubbles.append(cur_bubble)
+        cur_bubble["texts"].append(text)
+
+    out = []
+    for b in bubbles:
+        out.append({
+            "role": b["role"],
+            "time": b["time"],
+            "text": "\n".join(b["texts"]).strip(),
+        })
+    return out
+
+
+# ---------------------------------------------------------------- V2.0：批量删除
+
+def delete_conversations(task_ids: list[str]) -> list[dict]:
+    """批量删除：逐条调用 delete_conversation，单条失败不中断。"""
+    reports = []
+    for tid in task_ids:
+        try:
+            reports.append(delete_conversation(tid))
+        except DeleteError as e:
+            reports.append({"task_id": tid, "error": str(e)})
+    return reports
+
+
+# ---------------------------------------------------------------- V2.0：恢复备份
+
+def backup_info(backup_dir: Path) -> dict:
+    """解析一个备份目录：时间、会话、数据库、体积。"""
+    info = {"dir": str(backup_dir), "time": "", "task_id": "",
+            "dbs": [], "size": 0}
+    manifest = backup_dir / "manifest.json"
+    try:
+        if manifest.exists():
+            m = json.loads(manifest.read_text(encoding="utf-8"))
+            info["task_id"] = m.get("task_id", "")
+            info["time"] = m.get("time", "")
+    except Exception:
+        pass
+    if not info["time"]:
+        info["time"] = backup_dir.name[:15] if backup_dir.name else ""
+    for db in ("tasks-index.sqlite", "db.sqlite"):
+        if (backup_dir / db).exists():
+            info["dbs"].append(db)
+            try:
+                info["size"] += (backup_dir / db).stat().st_size
+            except OSError:
+                pass
+    return info
+
+
+def restore_backup(backup_dir: Path) -> dict:
+    """
+    从备份目录恢复数据库到原位置。
+    恢复前先对当前库做一次安全备份（_restore-<ts>/current），保证可逆。
+    """
+    report = {"dir": str(backup_dir), "restored": [], "failed": []}
+    bdir = Path(backup_dir)
+    if not bdir.is_dir():
+        raise DeleteError("备份目录不存在。")
+
+    available = [d for d in ("tasks-index.sqlite", "db.sqlite")
+                 if (bdir / d).exists()]
+    if not available:
+        raise DeleteError("该备份目录中未找到数据库文件。")
+
+    # 当前库的安全备份
+    safe = BACKUP_ROOT / f"restore-{time.strftime('%Y%m%d_%H%M%S')}_current"
+    try:
+        safe.mkdir(parents=True, exist_ok=True)
+        for db in (TASKS_DB, CLI_DB):
+            if db.exists():
+                shutil.copy2(db, safe / db.name)
+        (safe / "manifest.json").write_text(
+            json.dumps({"note": "restore-before-safety-copy"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        report["safety_backup"] = str(safe)
+    except OSError as e:
+        raise DeleteError(f"恢复前安全备份失败，已中止：{e}") from e
+
+    # 回写备份库
+    for name in available:
+        src = bdir / name
+        dst = TASKS_DB if name == "tasks-index.sqlite" else CLI_DB
+        try:
+            shutil.copy2(src, dst)
+            report["restored"].append(name)
+        except OSError as e:
+            report["failed"].append(f"{name}: {e}")
+
+    # 清理可能残留的 WAL/SHM
+    for db in (TASKS_DB, CLI_DB):
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(db) + suffix)
+            if side.exists():
+                try:
+                    side.unlink()
+                except OSError:
+                    pass
+    if report["failed"]:
+        raise DeleteError("部分数据库恢复失败：" + "；".join(report["failed"]))
+    return report
+
+
+# ---------------------------------------------------------------- V2.0：配置与系统主题
+
+CONFIG_PATH = HOME / ".zcode-cleaner-config.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(cfg: dict):
+    try:
+        CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+    except OSError:
+        pass
+
+
+def system_dark_theme() -> bool:
+    """检测 Windows 系统深色模式（AppsUseLightTheme=0 视为深色）。"""
+    try:
+        out = subprocess.run(
+            ["reg", "query",
+             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+             "/v", "AppsUseLightTheme"],
+            capture_output=True, text=True, timeout=10,
+            encoding="gbk", errors="ignore", creationflags=0x08000000,
+        ).stdout
+        return "0x0" in out.lower()
+    except Exception:
+        return False
