@@ -13,8 +13,6 @@
 
 *Scan · Review · Delete — cleanly.*
 
-<img src="assets/preview.png" width="760" alt="应用截图"/>
-
 </div>
 
 ---
