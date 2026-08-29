@@ -10,6 +10,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white)](#)
 [![PySide6](https://img.shields.io/badge/GUI-PySide6%20%2F%20Qt6-41CD52?logo=qt&logoColor=white)](#)
 [![License: MIT](https://img.shields.io/badge/license-MIT-8A2BE2)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/uahz/zcode-conversation-cleaner?color=FF5F57&label=%E4%B8%8B%E8%BD%BD&logo=github)](https://github.com/uahz/zcode-conversation-cleaner/releases/latest)
 
 *Scan · Review · Delete — cleanly.*
 
@@ -47,6 +48,8 @@
 
 ## 🚀 快速开始
 
+> **💾 不想装环境？** 直接下载 [ZcodeConversationCleaner.exe](https://github.com/uahz/zcode-conversation-cleaner/releases/latest)（Windows 10/11，免安装，双击即用）。
+
 ```bash
 # 1. 克隆
 git clone https://github.com/uahz/zcode-conversation-cleaner.git
@@ -59,7 +62,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Windows 用户也可以直接双击 `启动Zcode对话删除程序.bat`（静默启动，无控制台窗口）。
+Windows 用户也可以直接运行编译好的 `ZcodeConversationCleaner.exe`（免安装、无控制台窗口）。
 
 ## 🛡️ 安全设计
 
