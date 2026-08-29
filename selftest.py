@@ -51,11 +51,16 @@ con.executescript(
       time_archived INTEGER, task_type TEXT DEFAULT 'interactive', title_source TEXT DEFAULT 'first_input');
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
       time_updated INTEGER, data TEXT, sequence INTEGER);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+      time_created INTEGER, time_updated INTEGER, data TEXT, sequence INTEGER);
     CREATE TABLE turn_usage (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
     INSERT INTO session VALUES ('sess_aaa-111','p1',NULL,NULL,'s1','F:/x',NULL,'测试对话','1.0',NULL,
       0,0,0,NULL,NULL,NULL,1000,2000,NULL,NULL,'interactive','first_input');
-    INSERT INTO message VALUES ('m1','sess_aaa-111',1,2,'hello',0);
-    INSERT INTO message VALUES ('m2','sess_aaa-111',3,4,'world',1);
+    INSERT INTO message VALUES ('m1','sess_aaa-111',1,2,'{"role":"user"}',0);
+    INSERT INTO message VALUES ('m2','sess_aaa-111',3,4,'{"role":"assistant"}',1);
+    INSERT INTO part VALUES ('p1','m1','sess_aaa-111',1,1,'{"type":"text","text":"你好世界"}',0);
+    INSERT INTO part VALUES ('p2','m2','sess_aaa-111',3,3,'{"type":"text","text":"回复内容"}',0);
+    INSERT INTO part VALUES ('p3','m2','sess_aaa-111',3,3,'{"type":"file","filename":"a.txt"}',1);
     INSERT INTO turn_usage VALUES ('t1','sess_aaa-111','{}');
     """
 )
@@ -84,7 +89,7 @@ print("[PASS] 扫描：识别 1 条对话，标题/消息数/状态正确")
 # ---- 2) 空列表 ----
 zd.delete_conversation  # noqa
 con = sqlite3.connect(zd.CLI_DB)
-con.execute("DELETE FROM session"); con.execute("DELETE FROM message"); con.execute("DELETE FROM turn_usage"); con.commit(); con.close()
+con.execute("DELETE FROM session"); con.execute("DELETE FROM message"); con.execute("DELETE FROM turn_usage"); con.execute("DELETE FROM part"); con.commit(); con.close()
 con = sqlite3.connect(zd.TASKS_DB)
 con.execute("DELETE FROM tasks"); con.commit(); con.close()
 assert zd.scan_conversations() == []
@@ -100,11 +105,15 @@ con.executescript(
       time_archived INTEGER, task_type TEXT DEFAULT 'interactive', title_source TEXT DEFAULT 'first_input');
     CREATE TABLE IF NOT EXISTS message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER,
       time_updated INTEGER, data TEXT, sequence INTEGER);
+    CREATE TABLE IF NOT EXISTS part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+      time_created INTEGER, time_updated INTEGER, data TEXT, sequence INTEGER);
     CREATE TABLE IF NOT EXISTS turn_usage (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
     INSERT INTO session VALUES ('sess_aaa-111','p1',NULL,NULL,'s1','F:/x',NULL,'测试对话','1.0',NULL,
       0,0,0,NULL,NULL,NULL,1000,2000,NULL,NULL,'interactive','first_input');
-    INSERT INTO message VALUES ('m1','sess_aaa-111',1,2,'hello',0);
-    INSERT INTO message VALUES ('m2','sess_aaa-111',3,4,'world',1);
+    INSERT INTO message VALUES ('m1','sess_aaa-111',1,2,'{"role":"user"}',0);
+    INSERT INTO message VALUES ('m2','sess_aaa-111',3,4,'{"role":"assistant"}',1);
+    INSERT INTO part VALUES ('p1','m1','sess_aaa-111',1,1,'{"type":"text","text":"你好世界"}',0);
+    INSERT INTO part VALUES ('p2','m2','sess_aaa-111',3,3,'{"type":"text","text":"回复内容"}',0);
     INSERT INTO turn_usage VALUES ('t1','sess_aaa-111','{}');
     """
 )
@@ -137,6 +146,82 @@ assert b"sess_aaa-111" not in raw, "数据库中仍有会话 ID 残留"
 print("[PASS] 删除：数据库行、关联文件、日志全部清除，无 ID 残留")
 print("[PASS] 备份：", report.get("backup_dir", "") != "")
 print("[PASS] 释放空间:", report["bytes"], "KB, 文件项:", report["files"])
+
+# ================= V2.0 功能自测 =================
+
+# 重建两个会话数据
+con = sqlite3.connect(zd.CLI_DB)
+con.execute("DELETE FROM session"); con.execute("DELETE FROM message")
+con.execute("DELETE FROM part"); con.execute("DELETE FROM turn_usage"); con.commit()
+con.executescript(
+    """
+    INSERT INTO session VALUES ('sess_aaa-111','p1',NULL,NULL,'s1','F:/x',NULL,'测试对话','1.0',NULL,
+      0,0,0,NULL,NULL,NULL,1000,2000,NULL,NULL,'interactive','first_input');
+    INSERT INTO session VALUES ('sess_bbb-222','p2',NULL,NULL,'s2','F:/y',NULL,'批量测试','1.0',NULL,
+      0,0,0,NULL,NULL,NULL,3000,4000,NULL,NULL,'interactive','first_input');
+    INSERT INTO message VALUES ('m1','sess_aaa-111',1,2,'{"role":"user"}',0);
+    INSERT INTO message VALUES ('m2','sess_aaa-111',3,4,'{"role":"assistant"}',1);
+    INSERT INTO part VALUES ('p1','m1','sess_aaa-111',1,1,'{"type":"text","text":"你好世界"}',0);
+    INSERT INTO part VALUES ('p2','m2','sess_aaa-111',3,3,'{"type":"text","text":"回复内容"}',0);
+    INSERT INTO part VALUES ('p3','m2','sess_aaa-111',3,3,'{"type":"file","filename":"a.txt"}',1);
+    INSERT INTO message VALUES ('m3','sess_bbb-222',5,6,'{"role":"user"}',0);
+    INSERT INTO part VALUES ('p4','m3','sess_bbb-222',5,5,'{"type":"text","text":"第二条对话"}',0);
+    INSERT INTO turn_usage VALUES ('t1','sess_aaa-111','{}');
+    INSERT INTO turn_usage VALUES ('t2','sess_bbb-222','{}');
+    """
+)
+con.commit(); con.close()
+con = sqlite3.connect(zd.TASKS_DB)
+con.execute("DELETE FROM tasks"); con.execute("DELETE FROM task_group_members"); con.commit()
+con.executescript(
+    """
+    INSERT INTO tasks VALUES ('F:/x','F:/x',NULL,'sess_aaa-111','测试对话','completed',NULL,'build',NULL,
+      NULL,NULL,1000,2000,NULL,0,0,0,0,0,'{}','');
+    INSERT INTO tasks VALUES ('F:/y','F:/y',NULL,'sess_bbb-222','批量测试','error',NULL,'build',NULL,
+      NULL,NULL,3000,4000,NULL,0,0,0,0,0,'{}','');
+    """
+)
+con.commit(); con.close()
+(zdir / "cli" / "rollout" / "model-io-sess_aaa-111.jsonl").write_text('{"io":1}\n', encoding="utf-8")
+(zdir / "cli" / "rollout" / "model-io-sess_bbb-222.jsonl").write_text('{"io":1}\n', encoding="utf-8")
+(zdir / "cli" / "artifacts" / "sess_aaa-111").mkdir(parents=True)
+(zdir / "cli" / "artifacts" / "sess_aaa-111" / "out.txt").write_text("x", encoding="utf-8")
+(zdir / "cli" / "exec" / "sess_aaa-111").mkdir(parents=True)
+(zdir / "cli" / "exec" / "sess_aaa-111" / "run.log").write_text("y", encoding="utf-8")
+(zdir / "cli" / "image-cache" / "sess_bbb-222").mkdir(parents=True)
+(zdir / "cli" / "image-cache" / "sess_bbb-222" / "img.png").write_text("z", encoding="utf-8")
+
+# ---- 4) 消息预览 ----
+msgs = zd.get_messages("sess_aaa-111")
+assert len(msgs) == 2, f"预览气泡数: {msgs}"
+assert msgs[0]["role"] == "user" and "你好世界" in msgs[0]["text"]
+assert msgs[1]["role"] == "assistant" and "回复内容" in msgs[1]["text"] and "📎" in msgs[1]["text"]
+print("[PASS] 消息预览：角色/文本/附件分组正确")
+
+# ---- 5) 体积统计 ----
+sz = zd.session_size("sess_aaa-111")
+assert sz > 0, "体积应为正"
+c = next(x for x in zd.scan_conversations() if x.task_id == "sess_aaa-111")
+assert c.size == sz and c.size_text != "—"
+print("[PASS] 体积统计：", sz, "bytes →", c.size_text)
+
+# ---- 6) 批量删除 ----
+reports = zd.delete_conversations(["sess_aaa-111", "sess_bbb-222"])
+assert len(reports) == 2 and all("error" not in r for r in reports)
+assert zd.scan_conversations() == []
+print("[PASS] 批量删除：2 条全部成功")
+
+# ---- 7) 恢复备份 ----
+bups = zd.list_backups()
+assert bups, "应有备份"
+info = zd.backup_info(bups[0])
+assert info["dbs"], f"备份应含数据库: {info}"
+report_r = zd.restore_backup(bups[0])
+assert "db.sqlite" in report_r["restored"]
+convs2 = zd.scan_conversations()
+assert len(convs2) == 1, f"恢复后应有 1 条: {convs2}"
+print("[PASS] 恢复备份：数据库回写成功，对话重新可见")
+print("[PASS] 恢复前安全备份:", report_r.get("safety_backup", "") != "")
 
 shutil.rmtree(tmp, ignore_errors=True)
 print("\n全部自测通过 ✅")
