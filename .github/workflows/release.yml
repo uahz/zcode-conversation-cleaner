@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# 关键：默认 token 只有 read 权限，发 Release 需要显式授予 write
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
